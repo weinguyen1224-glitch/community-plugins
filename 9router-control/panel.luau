@@ -14,6 +14,9 @@ local STATE = {
     models = "9router.models",
     selected = "9router.selected_combo",
     last_error = "9router.last_error",
+    usage = "9router.usage",
+    providers = "9router.providers",
+    quota = "9router.quota",
 }
 
 local PAD = 12
@@ -39,6 +42,14 @@ local KIND_OPTIONS = {
     { value = "fallback", label_key = "kind.fallback" },
     { value = "round-robin", label_key = "kind.round_robin" },
     { value = "fusion", label_key = "kind.fusion" },
+}
+
+-- Top-level navigation tabs.
+local current_tab = "combos"
+local TABS = {
+    { id = "combos", label_key = "tab.combos", glyph = "route" },
+    { id = "requests", label_key = "tab.requests", glyph = "activity" },
+    { id = "quota", label_key = "tab.quota", glyph = "gauge" },
 }
 
 -- ── i18n ─────────────────────────────────────────────────────────────────────
@@ -153,10 +164,278 @@ local function combos_fingerprint(combos)
     return table.concat(parts, "\1")
 end
 
+-- Format a large count as a compact human string (1.2K, 3.4M, 1.5B).
+local function fmt_num(n)
+    n = tonumber(n) or 0
+    if n >= 1e9 then return string.format("%.1fB", n / 1e9) end
+    if n >= 1e6 then return string.format("%.1fM", n / 1e6) end
+    if n >= 1e3 then return string.format("%.1fK", n / 1e3) end
+    return tostring(math.floor(n))
+end
+
+local function fmt_cost(n)
+    n = tonumber(n) or 0
+    return string.format("$%.2f", n)
+end
+
+-- Usage summary card: quota used (requests/tokens/cost) + realtime activity.
+local function usage_rows(usage)
+    if type(usage) ~= "table" then return nil end
+    local rows = {}
+
+    local prompt = tonumber(usage.totalPromptTokens) or 0
+    local completion = tonumber(usage.totalCompletionTokens) or 0
+    local total_tokens = prompt + completion
+    local requests = tonumber(usage.totalRequests) or 0
+    local cost = tonumber(usage.totalCost) or 0
+
+    rows[#rows + 1] = ui.row({ gap = 8, align = "center" }, {
+        ui.glyph({ name = "activity", color = "primary", size = 16 }),
+        ui.label({ text = tr("usage.title"), fontWeight = "bold", fontSize = 13 }),
+    })
+
+    rows[#rows + 1] = ui.row({ gap = 12, align = "center" }, {
+        ui.column({ gap = 1 }, {
+            ui.label({ text = tr("usage.requests"), opacity = 0.6, fontSize = 10 }),
+            ui.label({ text = fmt_num(requests), fontWeight = "bold", fontSize = 14 }),
+        }),
+        ui.column({ gap = 1 }, {
+            ui.label({ text = tr("usage.tokens"), opacity = 0.6, fontSize = 10 }),
+            ui.label({ text = fmt_num(total_tokens), fontWeight = "bold", fontSize = 14 }),
+        }),
+        ui.column({ gap = 1 }, {
+            ui.label({ text = tr("usage.cost"), opacity = 0.6, fontSize = 10 }),
+            ui.label({ text = fmt_cost(cost), fontWeight = "bold", fontSize = 14 }),
+        }),
+    })
+
+    -- Realtime: active requests
+    local active = usage.activeRequests
+    if type(active) == "table" and #active > 0 then
+        local names = {}
+        for _, a in ipairs(active) do
+            if type(a) == "table" then
+                names[#names + 1] = tostring(a.model or "") .. (a.count and a.count > 1 and (" ×" .. tostring(a.count)) or "")
+            end
+        end
+        rows[#rows + 1] = ui.row({ gap = 6, align = "center" }, {
+            ui.glyph({ name = "loader", color = "primary", size = 12 }),
+            ui.label({ text = tr("usage.active", { count = tostring(#active) }), fontSize = 11, opacity = 0.8 }),
+            ui.label({ text = table.concat(names, ", "), fontSize = 11, opacity = 0.6, maxWidth = WRAP - 120 }),
+        })
+    end
+
+    -- Realtime: recent requests (last 3)
+    local recent = usage.recentRequests
+    if type(recent) == "table" and #recent > 0 then
+        local items = {}
+        for i = 1, math.min(3, #recent) do
+            local r = recent[i]
+            if type(r) == "table" then
+                local tok = (tonumber(r.promptTokens) or 0) + (tonumber(r.completionTokens) or 0)
+                items[#items + 1] = ui.label({
+                    text = tostring(r.model or "") .. " · " .. fmt_num(tok),
+                    fontSize = 11,
+                    opacity = 0.6,
+                    maxWidth = WRAP,
+                })
+            end
+        end
+        if #items > 0 then
+            rows[#rows + 1] = ui.column({ gap = 2 }, items)
+        end
+    end
+
+    return rows
+end
+
+-- Top-level tab bar (combos / requests / quota).
+local function tab_bar()
+    local buttons = {}
+    for _, t in ipairs(TABS) do
+        local active = current_tab == t.id
+        buttons[#buttons + 1] = ui.button({
+            text = tr(t.label_key),
+            glyph = t.glyph,
+            variant = active and "primary" or "secondary",
+            onClick = function()
+                current_tab = t.id
+                render()
+            end,
+        })
+    end
+    return ui.row({ gap = 6, align = "center" }, buttons)
+end
+
+-- ── requests view ────────────────────────────────────────────────────────────
+
+local function render_requests(conn)
+    local rows = {}
+    rows[#rows + 1] = tab_bar()
+    rows[#rows + 1] = ui.separator({})
+
+    local usage = noctalia.state.get(STATE.usage)
+    local online = type(conn) == "table" and conn.status == "online"
+
+    if not online then
+        rows[#rows + 1] = ui.label({ text = tr("requests.offline"), opacity = 0.7, maxWidth = WRAP })
+        panel.render(ui.column({ padding = PAD, gap = 8, flexGrow = 1, align = "stretch", justify = "start" }, rows))
+        return
+    end
+
+    -- Usage summary (requests/tokens/cost + realtime activity)
+    local ur = usage_rows(usage)
+    if ur then
+        rows[#rows + 1] = ui.column({ gap = 6, padding = 10, radius = 10, fill = "surface", border = "surface", borderWidth = 1 }, ur)
+        rows[#rows + 1] = ui.separator({})
+    end
+
+    -- Active (in-flight) requests
+    rows[#rows + 1] = ui.row({ gap = 8, align = "center" }, {
+        ui.glyph({ name = "loader", color = "primary", size = 16 }),
+        ui.label({ text = tr("requests.active_title"), fontWeight = "bold", fontSize = 13 }),
+    })
+
+    local active = type(usage) == "table" and usage.activeRequests or nil
+    if type(active) ~= "table" or #active == 0 then
+        rows[#rows + 1] = ui.label({ text = tr("requests.active_empty"), opacity = 0.6, fontSize = 12, maxWidth = WRAP })
+    else
+        for _, a in ipairs(active) do
+            if type(a) == "table" then
+                rows[#rows + 1] = ui.row({ gap = 8, align = "center", padding = 8, radius = 8, fill = "surface", border = "surface", borderWidth = 1 }, {
+                    ui.column({ gap = 1, flexGrow = 1 }, {
+                        ui.label({ text = tostring(a.model or ""), fontWeight = "bold", fontSize = 13, maxWidth = WRAP - 120 }),
+                        ui.label({ text = tostring(a.provider or ""), opacity = 0.6, fontSize = 11 }),
+                    }),
+                    ui.label({ text = tr("requests.count", { count = tostring(a.count or 1) }), fontSize = 12, opacity = 0.7 }),
+                })
+            end
+        end
+    end
+
+    rows[#rows + 1] = ui.separator({})
+
+    -- Recent requests
+    rows[#rows + 1] = ui.row({ gap = 8, align = "center" }, {
+        ui.glyph({ name = "activity", color = "primary", size = 16 }),
+        ui.label({ text = tr("requests.recent_title"), fontWeight = "bold", fontSize = 13 }),
+    })
+
+    local recent = type(usage) == "table" and usage.recentRequests or nil
+    local recent_items = {}
+    if type(recent) ~= "table" or #recent == 0 then
+        recent_items[#recent_items + 1] = ui.label({ text = tr("requests.recent_empty"), opacity = 0.6, fontSize = 12, maxWidth = WRAP })
+    else
+        for _, r in ipairs(recent) do
+            if type(r) == "table" then
+                local tok = (tonumber(r.promptTokens) or 0) + (tonumber(r.completionTokens) or 0)
+                recent_items[#recent_items + 1] = ui.row({ gap = 8, align = "center", padding = 8, radius = 8, fill = "surface", border = "surface", borderWidth = 1 }, {
+                    ui.column({ gap = 1, flexGrow = 1 }, {
+                        ui.label({ text = tostring(r.model or ""), fontWeight = "bold", fontSize = 13, maxWidth = WRAP - 120 }),
+                        ui.label({ text = tostring(r.provider or ""), opacity = 0.6, fontSize = 11 }),
+                    }),
+                    ui.column({ gap = 1, align = "end" }, {
+                        ui.label({ text = fmt_num(tok), fontSize = 12, opacity = 0.7 }),
+                        ui.label({ text = tostring(r.status or ""), fontSize = 11, opacity = 0.5 }),
+                    }),
+                })
+            end
+        end
+    end
+    rows[#rows + 1] = ui.scroll({ flexGrow = 1, gap = 6, align = "stretch", justify = "start" }, recent_items)
+
+    panel.render(ui.column({ padding = PAD, gap = 8, flexGrow = 1, align = "stretch", justify = "start" }, rows))
+end
+
+-- ── quota view ───────────────────────────────────────────────────────────────
+
+local function render_quota(conn)
+    local rows = {}
+    rows[#rows + 1] = tab_bar()
+    rows[#rows + 1] = ui.separator({})
+
+    local online = type(conn) == "table" and conn.status == "online"
+
+    if not online then
+        rows[#rows + 1] = ui.label({ text = tr("quota.offline"), opacity = 0.7, maxWidth = WRAP })
+        panel.render(ui.column({ padding = PAD, gap = 8, flexGrow = 1, align = "stretch", justify = "start" }, rows))
+        return
+    end
+
+    -- Per-provider quota (weekly / session / model limits).
+    local quota = noctalia.state.get(STATE.quota) or {}
+
+    local function fmt_reset(resetAt)
+        if type(resetAt) ~= "string" or resetAt == "" then return nil end
+        local y, m, d = resetAt:match("^(%d+)-(%d+)-(%d+)")
+        if not y then return nil end
+        return string.format("%s/%s/%s", d, m, y)
+    end
+
+    local function pct_color(pct)
+        if pct == nil then return "primary" end
+        if pct < 20 then return "error" end
+        if pct < 50 then return "warning" end
+        return "primary"
+    end
+
+    local items = {}
+    if #quota == 0 then
+        items[#items + 1] = ui.label({ text = tr("quota.empty"), opacity = 0.6, fontSize = 12, maxWidth = WRAP })
+    else
+        for _, entry in ipairs(quota) do
+            local qrows = {}
+            for _, q in ipairs(entry.quotas) do
+                local pct = q.remainingPercentage
+                local pct_text
+                if pct ~= nil then
+                    pct_text = string.format("%.0f%%", pct)
+                elseif q.total and q.total > 0 then
+                    pct = (q.total - q.used) / q.total * 100
+                    pct_text = string.format("%.0f%%", pct)
+                else
+                    pct_text = "—"
+                end
+                local sub
+                if q.unlimited then
+                    sub = tr("quota.unlimited")
+                else
+                    sub = tr("quota.used_of", { used = fmt_num(q.used), total = fmt_num(q.total) })
+                    local r = fmt_reset(q.resetAt)
+                    if r then sub = sub .. " · " .. tr("quota.resets", { date = r }) end
+                end
+                qrows[#qrows + 1] = ui.row({ gap = 8, align = "center" }, {
+                    ui.column({ gap = 1, flexGrow = 1 }, {
+                        ui.label({ text = q.name, fontSize = 12, maxWidth = WRAP - 140 }),
+                        ui.label({ text = sub, opacity = 0.6, fontSize = 10 }),
+                    }),
+                    ui.label({ text = pct_text, fontWeight = "bold", fontSize = 13, color = pct_color(pct) }),
+                })
+            end
+            local header = {
+                ui.label({ text = entry.provider or entry.name or "?", fontWeight = "bold", fontSize = 14, color = "primary", maxWidth = WRAP }),
+            }
+            if entry.name and entry.name ~= "" and entry.name ~= entry.provider then
+                header[#header + 1] = ui.label({ text = entry.name, opacity = 0.6, fontSize = 10, maxWidth = WRAP })
+            end
+            items[#items + 1] = ui.column({ gap = 6, padding = 10, radius = 10, fill = "surface", border = "surface", borderWidth = 1 }, {
+                ui.column({ gap = 1 }, header),
+                ui.column({ gap = 4, align = "stretch" }, qrows),
+            })
+        end
+    end
+    rows[#rows + 1] = ui.scroll({ flexGrow = 1, gap = 6, align = "stretch", justify = "start" }, items)
+
+    panel.render(ui.column({ padding = PAD, gap = 8, flexGrow = 1, align = "stretch", justify = "start" }, rows))
+end
+
 -- ── list view ───────────────────────────────────────────────────────────────
 
 local function render_list(combos, conn)
     local rows = {}
+
+    rows[#rows + 1] = tab_bar()
+    rows[#rows + 1] = ui.separator({})
 
     -- Header
     rows[#rows + 1] = ui.row({ justify = "space_between", align = "center" }, {
@@ -837,6 +1116,16 @@ render = function()
         return
     end
 
+    if current_tab == "requests" then
+        render_requests(conn)
+        return
+    end
+
+    if current_tab == "quota" then
+        render_quota(conn)
+        return
+    end
+
     -- Create view takes priority
     if creating then
         render_create()
@@ -865,11 +1154,72 @@ local function fingerprint_state()
     local combos = noctalia.state.get(STATE.combos)
     local selected_id = noctalia.state.get(STATE.selected)
     local err = noctalia.state.get(STATE.last_error)
+    local usage = noctalia.state.get(STATE.usage)
+    local usage_fp = "none"
+    if type(usage) == "table" then
+        local active = type(usage.activeRequests) == "table" and #usage.activeRequests or 0
+        local recent = type(usage.recentRequests) == "table" and #usage.recentRequests or 0
+        local bp = type(usage.byProvider) == "table" and usage.byProvider or {}
+        local bp_parts = {}
+        for name, p in pairs(bp) do
+            if type(p) == "table" then
+                local tok = (tonumber(p.promptTokens) or 0) + (tonumber(p.completionTokens) or 0)
+                bp_parts[#bp_parts + 1] = tostring(name) .. ":" .. tostring(tok)
+            end
+        end
+        table.sort(bp_parts)
+        usage_fp = table.concat({
+            tostring(usage.totalRequests or 0),
+            tostring(usage.totalPromptTokens or 0),
+            tostring(usage.totalCompletionTokens or 0),
+            tostring(usage.totalCost or 0),
+            tostring(active),
+            tostring(recent),
+            table.concat(bp_parts, ","),
+        }, "|")
+    end
+
+    local quota = noctalia.state.get(STATE.quota)
+    local quota_fp = "none"
+    if type(quota) == "table" then
+        local parts = {}
+        for _, e in ipairs(quota) do
+            if type(e) == "table" then
+                local qparts = {}
+                for _, q in ipairs(e.quotas or {}) do
+                    if type(q) == "table" then
+                        qparts[#qparts + 1] = tostring(q.name or "") .. ":" .. tostring(q.remainingPercentage or "")
+                    end
+                end
+                parts[#parts + 1] = tostring(e.provider or "") .. "[" .. table.concat(qparts, ",") .. "]"
+            end
+        end
+        table.sort(parts)
+        quota_fp = table.concat(parts, ",")
+    end
+
+    local providers = noctalia.state.get(STATE.providers)
+    local providers_fp = "none"
+    if type(providers) == "table" then
+        local parts = {}
+        for _, p in ipairs(providers) do
+            if type(p) == "table" then
+                parts[#parts + 1] = tostring(p.id or "") .. ":" .. tostring(p.name or "")
+            end
+        end
+        table.sort(parts)
+        providers_fp = table.concat(parts, ",")
+    end
+
     return table.concat({
         (type(conn) == "table" and conn.status or "offline"),
         tostring(selected_id or "none"),
         (type(err) == "table" and tostring(err.message) or "none"),
         combos_fingerprint(combos),
+        usage_fp,
+        quota_fp,
+        providers_fp,
+        current_tab,
     }, "\1")
 end
 

@@ -4,6 +4,7 @@
 
 local STATE_KEY = "9router.connection"
 local COMBOS_KEY = "9router.combos"
+local USAGE_KEY = "9router.usage"
 
 local GLYPH = {
     online = "route",
@@ -23,6 +24,7 @@ local TICK_MS = 100
 
 local snap = { status = "offline" }
 local combo_count = 0
+local usage_snap = nil
 local phase = BREATH_PERIOD / 2
 
 -- Translation with an optional per-plugin language override (mirrors panel.luau).
@@ -111,6 +113,14 @@ local function paint()
     barWidget.setGlyphColor(dim(ACCENT_RGB[c] or ACCENT_RGB.secondary, level_for(BREATH_PERIOD)))
 end
 
+local function fmt_num(n)
+    n = tonumber(n) or 0
+    if n >= 1e9 then return string.format("%.1fB", n / 1e9) end
+    if n >= 1e6 then return string.format("%.1fM", n / 1e6) end
+    if n >= 1e3 then return string.format("%.1fK", n / 1e3) end
+    return tostring(math.floor(n))
+end
+
 local function render()
     paint()
     local tip = tr("state.tip." .. tostring(snap.status)) or tr("state.tip.offline")
@@ -119,6 +129,11 @@ local function render()
     end
     if snap.status == "online" then
         tip = tip .. "\n" .. tr("state.combos", { count = combo_count })
+        if type(usage_snap) == "table" then
+            local tokens = (tonumber(usage_snap.totalPromptTokens) or 0) + (tonumber(usage_snap.totalCompletionTokens) or 0)
+            local active = type(usage_snap.activeRequests) == "table" and #usage_snap.activeRequests or 0
+            tip = tip .. "\n" .. tr("state.usage", { tokens = fmt_num(tokens), active = tostring(active) })
+        end
     end
     barWidget.setTooltip(tip)
 end
@@ -141,6 +156,11 @@ local function apply_combos(list)
     render()
 end
 
+local function apply_usage(u)
+    usage_snap = u
+    render()
+end
+
 function onClick()
     noctalia.togglePanel("weinguyen/9router-control:panel")
 end
@@ -158,8 +178,10 @@ end
 
 noctalia.state.watch(STATE_KEY, apply)
 noctalia.state.watch(COMBOS_KEY, apply_combos)
+noctalia.state.watch(USAGE_KEY, apply_usage)
 noctalia.setUpdateInterval(TICK_MS)
 
 apply(noctalia.state.get(STATE_KEY))
 apply_combos(noctalia.state.get(COMBOS_KEY))
+apply_usage(noctalia.state.get(USAGE_KEY))
 render()
