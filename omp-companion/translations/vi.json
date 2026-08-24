@@ -1,0 +1,41 @@
+{
+  "panel": {
+    "title": "OMP Companion",
+    "listen": "Nghe",
+    "stop": "Dừng",
+    "send": "Gửi",
+    "placeholder": "Hỏi omp bất cứ điều gì…  (Enter = gửi)",
+    "empty": "Nhấn Nghe để nói, hoặc gõ lệnh bên dưới.",
+    "session_placeholder": "Chọn phiên…",
+    "new": "Mới",
+    "role_user": "Bạn",
+    "role_assistant": "omp",
+    "thinking": "Đang suy nghĩ…",
+    "status": {
+      "listening": "Đang nghe…",
+      "transcribed": "Đã nhận dạng — đang chạy…"
+    }
+  },
+  "settings": {
+    "port": {
+      "label": "Cổng",
+      "description": "Cổng local cho HTTP server của helper. Mặc định: 4097."
+    },
+    "voice_language": {
+      "label": "Ngôn ngữ giọng nói",
+      "description": "Ngôn ngữ nhận dạng giọng nói (hyprwhspr).",
+      "options": {
+        "en": "English",
+        "vi": "Tiếng Việt"
+      }
+    },
+    "auto_approve": {
+      "label": "Tự động duyệt",
+      "description": "Tự động duyệt mọi tool call của omp (bỏ qua hỏi xác nhận)."
+    },
+    "cwd": {
+      "label": "Thư mục làm việc",
+      "description": "Thư mục omp khởi động. Để trống dùng home."
+    }
+  }
+}

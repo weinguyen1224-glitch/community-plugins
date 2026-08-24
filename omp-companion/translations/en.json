@@ -1,0 +1,41 @@
+{
+  "panel": {
+    "title": "OMP Companion",
+    "listen": "Listen",
+    "stop": "Stop",
+    "send": "Send",
+    "placeholder": "Ask omp anything…  (Enter = send)",
+    "empty": "Press Listen to speak, or type a prompt below.",
+    "session_placeholder": "Select session…",
+    "new": "New",
+    "role_user": "You",
+    "role_assistant": "omp",
+    "thinking": "Thinking…",
+    "status": {
+      "listening": "Listening…",
+      "transcribed": "Transcribed — running…"
+    }
+  },
+  "settings": {
+    "port": {
+      "label": "Port",
+      "description": "Local port for the helper HTTP server. Default: 4097."
+    },
+    "voice_language": {
+      "label": "Voice Language",
+      "description": "Language for speech recognition (hyprwhspr).",
+      "options": {
+        "en": "English",
+        "vi": "Tiếng Việt"
+      }
+    },
+    "auto_approve": {
+      "label": "Auto-approve",
+      "description": "Auto-approve all omp tool calls (skip approval prompts)."
+    },
+    "cwd": {
+      "label": "Working Directory",
+      "description": "Directory omp starts in. Leave empty for home."
+    }
+  }
+}

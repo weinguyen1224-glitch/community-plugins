@@ -1,0 +1,55 @@
+id = "weinguyen/omp-companion"
+name = "OMP Companion"
+version = "0.1.0"
+plugin_api = 21
+author = "weinguyen"
+license = "MIT"
+icon = "mic"
+description = "Voice-driven coding assistant: listen via hyprwhspr, transcribe, and execute tasks with oh-my-pi (omp)."
+tags = ["ai", "voice", "productivity", "development", "panel"]
+dependencies = ["omp", "hyprwhspr", "bun"]
+
+# ── User settings ─────────────────────────────────────────────────────────────
+[[setting]]
+key = "port"
+type = "int"
+default = 4097
+label_key = "settings.port.label"
+description_key = "settings.port.description"
+
+[[setting]]
+key = "voice_language"
+type = "select"
+default = "vi"
+label_key = "settings.voice_language.label"
+description_key = "settings.voice_language.description"
+options = [
+  { value = "en", label_key = "settings.voice_language.options.en" },
+  { value = "vi", label_key = "settings.voice_language.options.vi" },
+]
+
+[[setting]]
+key = "auto_approve"
+type = "bool"
+default = true
+label_key = "settings.auto_approve.label"
+description_key = "settings.auto_approve.description"
+
+[[setting]]
+key = "cwd"
+type = "folder"
+default = ""
+label_key = "settings.cwd.label"
+description_key = "settings.cwd.description"
+
+# ── Entries ───────────────────────────────────────────────────────────────────
+[[widget]]
+id = "widget"
+entry = "widget.luau"
+
+[[panel]]
+id = "panel"
+entry = "panel.luau"
+placement = "floating"
+width = 560
+height = 720
