@@ -9,6 +9,8 @@ Noctalia bar — no web dashboard needed.
 - **Create / rename / delete combos** — full CRUD from the panel.
 - **Change routing kind** — fallback, round-robin, or fusion.
 - **Search** — filter combos by name or model chain.
+- **Usage & quota** — see 24h token/request/cost totals plus realtime active
+  and recent requests, right in the panel and the bar widget tooltip.
 
 ## Plugin
 

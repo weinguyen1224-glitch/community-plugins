@@ -100,12 +100,23 @@ end
 
 -- ── state ────────────────────────────────────────────────────────────────────
 
+local USAGE_POLL_MS = 5000
+-- Quota is weekly/session (slow-changing); fetch it on its own slower cadence
+-- and one connection at a time (noctalia.http caps ~8 concurrent requests, so
+-- the old fan-out of 14 requests dropped the tail and never finished).
+local QUOTA_POLL_SECONDS = 60
+local quota_loading = false
+local last_quota_load = 0
+
 local connection = { status = "offline", error = "" }
 local combos = {}
 local models = {}
 local selected_combo_id = nil
 local last_error = nil
 local auth_token = nil -- JWT cookie captured from a successful login
+local usage = nil -- latest /api/usage/stats payload (24h, realtime)
+local providers = {} -- full provider list from /api/usage/providers
+local quota = {} -- per-provider quota: { provider, name, quotas = { {name, used, total, remainingPercentage, resetAt, unlimited} } }
 
 local function publish()
     noctalia.state.set("9router.connection", connection)
@@ -113,6 +124,9 @@ local function publish()
     noctalia.state.set("9router.models", models)
     noctalia.state.set("9router.selected_combo", selected_combo_id)
     noctalia.state.set("9router.last_error", last_error)
+    noctalia.state.set("9router.usage", usage)
+    noctalia.state.set("9router.providers", providers)
+    noctalia.state.set("9router.quota", quota)
 end
 
 local function set_connection(status, err)
@@ -274,8 +288,11 @@ local function load_combos()
     end)
 end
 
+local load_usage -- fwd decl: defined below, used by refresh_combos
+
 local function refresh_combos()
     load_combos()
+    load_usage()
 end
 
 local function load_models()
@@ -285,6 +302,113 @@ local function load_models()
         if not data or type(data.models) ~= "table" then return end
         models = data.models
         publish()
+    end)
+end
+
+function load_usage()
+    request("GET", "/api/usage/stats?period=24h", nil, function(resp)
+        if not resp.ok then return end
+        local data = decode_body(resp.body)
+        if not data then return end
+        usage = data
+        publish()
+    end)
+end
+
+local function load_providers()
+    request("GET", "/api/usage/providers", nil, function(resp)
+        if not resp.ok then return end
+        local data = decode_body(resp.body)
+        if not data or type(data.providers) ~= "table" then return end
+        providers = data.providers
+        publish()
+    end)
+end
+
+-- Fetch real per-provider quota. 9Router exposes it via /api/usage/<connectionId>
+-- (each provider's own API, e.g. Ollama "Session (5h)" / "Weekly (7d)"). We first
+-- list connections from /api/providers, then fetch each connection's quotas.
+local function clean_provider(p)
+    if type(p) ~= "string" then return p end
+    -- "openai-compatible-chat-<uuid>" -> "openai-compatible-chat"
+    return p:gsub("%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+$", "")
+end
+
+local function load_quota()
+    if quota_loading then return end
+    if os.time() - last_quota_load < QUOTA_POLL_SECONDS then return end
+    quota_loading = true
+    request("GET", "/api/providers", nil, function(resp)
+        if not resp.ok then
+            quota_loading = false
+            return
+        end
+        local data = decode_body(resp.body)
+        if not data or type(data.connections) ~= "table" then
+            quota_loading = false
+            return
+        end
+        local ids = {}
+        local meta = {}
+        for _, c in ipairs(data.connections) do
+            if type(c) == "table" and c.id then
+                ids[#ids + 1] = c.id
+                meta[c.id] = { provider = clean_provider(c.provider), name = c.name }
+            end
+        end
+        if #ids == 0 then
+            quota = {}
+            publish()
+            quota_loading = false
+            last_quota_load = os.time()
+            return
+        end
+        local result = {}
+        local idx = 0
+        -- Fetch each connection's quota one at a time; publish after every
+        -- response so partial results show instead of waiting for the slowest.
+        local function next_one()
+            idx = idx + 1
+            local id = ids[idx]
+            if not id then
+                quota = result
+                publish()
+                quota_loading = false
+                last_quota_load = os.time()
+                return
+            end
+            request("GET", "/api/usage/" .. id, nil, function(uresp)
+                if uresp.ok then
+                    local udata = decode_body(uresp.body)
+                    if udata and type(udata.quotas) == "table" then
+                        local quotas = {}
+                        for qname, q in pairs(udata.quotas) do
+                            if type(q) == "table" then
+                                quotas[#quotas + 1] = {
+                                    name = q.displayName or qname,
+                                    used = tonumber(q.used) or 0,
+                                    total = tonumber(q.total) or 0,
+                                    remainingPercentage = tonumber(q.remainingPercentage),
+                                    resetAt = q.resetAt,
+                                    unlimited = q.unlimited == true,
+                                }
+                            end
+                        end
+                        if #quotas > 0 then
+                            result[#result + 1] = {
+                                provider = meta[id].provider,
+                                name = meta[id].name,
+                                quotas = quotas,
+                            }
+                        end
+                    end
+                end
+                quota = result
+                publish()
+                next_one()
+            end)
+        end
+        next_one()
     end)
 end
 
@@ -544,9 +668,23 @@ function onOpen()
     publish()
     load_combos()
     load_models()
+    load_usage()
+    load_providers()
+    load_quota()
+    noctalia.setUpdateInterval(USAGE_POLL_MS)
 end
 
 function onExit()
+end
+
+-- Realtime usage polling: refresh /api/usage/stats while connected.
+function update()
+    noctalia.setUpdateInterval(USAGE_POLL_MS)
+    if connection.status == "online" then
+        load_usage()
+        load_quota()
+        load_providers()
+    end
 end
 
 -- Start on load
